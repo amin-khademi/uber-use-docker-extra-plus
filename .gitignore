@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Loki data files
+loki/data/*
+!loki/data/.gitkeep
+
+# Operating system files
+.DS_Store
+Thumbs.db
