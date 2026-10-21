@@ -26,24 +26,24 @@ def on_ride_request(ch, method, properties, body):
     longitude = data['longitude']
     trip_id = data['trip_id']
 
-    # 1. Find nearest driver via Location Service
+    # 1. Find nearest driver via Location Service (retry up to 5 times if driver update is in-flight)
     location_service_url = os.environ.get("LOCATION_SERVICE_URL")
     driver_id = None
-    try:
-        response = requests.get(
-            f"{location_service_url}/find-nearest-driver",
-            params={"latitude": latitude, "longitude": longitude}
-        )
-        response.raise_for_status()
-        driver_info = response.json()
-        if driver_info and 'driver_id' in driver_info:
-            driver_id = driver_info['driver_id']
-            print(f"[*] Found nearest driver: {driver_id}")
-    except requests.exceptions.RequestException as e:
-        print(f" [!] Could not connect to location service: {e}")
-        # Here you could re-queue the message, or mark the trip as failed
-        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
-        return
+    for attempt in range(5):
+        try:
+            response = requests.get(
+                f"{location_service_url}/find-nearest-driver",
+                params={"latitude": latitude, "longitude": longitude}
+            )
+            response.raise_for_status()
+            driver_info = response.json()
+            if driver_info and 'driver_id' in driver_info:
+                driver_id = driver_info['driver_id']
+                print(f"[*] Found nearest driver: {driver_id}")
+                break
+        except requests.exceptions.RequestException as e:
+            print(f" [!] Could not connect to location service (attempt {attempt + 1}/5): {e}")
+        time.sleep(2)
 
     # 2. If driver found, update the trip in PostgreSQL
     if driver_id:

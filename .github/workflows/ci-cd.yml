@@ -46,20 +46,28 @@ jobs:
         run: |
           docker compose up --build -d
 
-      - name: Wait for Services Health
+      - name: Wait for Services and Driver Simulator
         run: |
-          echo "Waiting for services to become healthy..."
+          echo "Waiting for PostgreSQL and Redis to become healthy..."
           timeout 120s bash -c '
             until [ "$(docker inspect -f {{.State.Health.Status}} uber-use-docker-extra-plus-postgres-1 2>/dev/null)" == "healthy" ] && \
                   [ "$(docker inspect -f {{.State.Health.Status}} uber-use-docker-extra-plus-redis-1 2>/dev/null)" == "healthy" ]; do
-              echo "Waiting for PostgreSQL and Redis health check..."
-              sleep 3
+              sleep 2
             done
           ' || { echo "Health checks timed out"; docker compose ps; docker compose logs; exit 1; }
+          echo "Database services are healthy!"
+          
+          echo "Waiting for driver simulator to report location..."
+          timeout 60s bash -c '
+            until docker compose logs simulator-alpha 2>&1 | grep -q "Location update sent successfully"; do
+              sleep 2
+            done
+          ' || { echo "Simulator logs:"; docker compose logs simulator-alpha; exit 1; }
+          echo "Driver-Alpha location confirmed in location service!"
+          sleep 2
 
       - name: Test User Registration Endpoint
         run: |
-          sleep 5
           RESPONSE=$(curl -s -X POST http://localhost/register \
             -H "Content-Type: application/json" \
             -d '{"name": "CI-Test-Rider", "type": "rider"}')
@@ -67,19 +75,24 @@ jobs:
           echo "$RESPONSE" | grep -q "Rider registered successfully" || exit 1
 
       - name: Test Ride Request Endpoint
+        id: request_step
         run: |
           RESPONSE=$(curl -s -X POST http://localhost/request_ride \
             -H "Content-Type: application/json" \
             -d '{"rider_id": 4, "latitude": 34.05, "longitude": -118.24}')
           echo "Request Ride Response: $RESPONSE"
           echo "$RESPONSE" | grep -q "Ride request received" || exit 1
+          TRIP_ID=$(echo "$RESPONSE" | grep -o '"trip_id":[0-9]*' | cut -d':' -f2)
+          echo "trip_id=$TRIP_ID" >> "$GITHUB_OUTPUT"
 
       - name: Test Ride Matching & Assignment
         run: |
-          echo "Waiting for matcher worker to assign driver..."
+          TRIP_ID="${{ steps.request_step.outputs.trip_id }}"
+          [ -z "$TRIP_ID" ] && TRIP_ID=1
+          echo "Waiting for matcher worker to assign driver to trip $TRIP_ID..."
           SUCCESS=false
-          for i in {1..15}; do
-            STATUS=$(curl -s http://localhost/trip/1 | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+          for i in {1..20}; do
+            STATUS=$(curl -s "http://localhost/trip/$TRIP_ID" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
             echo "Attempt $i: Trip status is '$STATUS'"
             if [ "$STATUS" == "assigned" ]; then
               SUCCESS=true
@@ -88,8 +101,10 @@ jobs:
             sleep 2
           done
           if [ "$SUCCESS" != "true" ]; then
-            echo "Trip assignment failed!"
+            echo "Trip assignment failed! Status: $STATUS"
             docker compose logs matcher
+            docker compose logs simulator-alpha
+            docker compose logs location
             exit 1
           fi
           echo "Trip successfully matched and assigned!"
