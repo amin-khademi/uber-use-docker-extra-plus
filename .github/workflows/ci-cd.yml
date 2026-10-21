@@ -1,0 +1,174 @@
+name: GeoRide CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Lint & Configuration Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Environment File
+        run: |
+          cp .env.example .env
+          echo "Environment file created from .env.example"
+
+      - name: Validate Docker Compose Configuration
+        run: |
+          docker compose config --quiet
+          echo "Docker compose configuration is valid!"
+
+  test:
+    name: Build & Integration Smoke Tests
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Environment File
+        run: |
+          cp .env.example .env
+
+      - name: Fix Loki storage directory permissions
+        run: |
+          mkdir -p loki/data
+          chmod -R 777 loki/data
+
+      - name: Build and Start Stack
+        run: |
+          docker compose up --build -d
+
+      - name: Wait for Services Health
+        run: |
+          echo "Waiting for services to become healthy..."
+          timeout 120s bash -c '
+            until [ "$(docker inspect -f {{.State.Health.Status}} uber-use-docker-extra-plus-postgres-1 2>/dev/null)" == "healthy" ] && \
+                  [ "$(docker inspect -f {{.State.Health.Status}} uber-use-docker-extra-plus-redis-1 2>/dev/null)" == "healthy" ]; do
+              echo "Waiting for PostgreSQL and Redis health check..."
+              sleep 3
+            done
+          ' || { echo "Health checks timed out"; docker compose ps; docker compose logs; exit 1; }
+
+      - name: Test User Registration Endpoint
+        run: |
+          sleep 5
+          RESPONSE=$(curl -s -X POST http://localhost/register \
+            -H "Content-Type: application/json" \
+            -d '{"name": "CI-Test-Rider", "type": "rider"}')
+          echo "Register Response: $RESPONSE"
+          echo "$RESPONSE" | grep -q "Rider registered successfully" || exit 1
+
+      - name: Test Ride Request Endpoint
+        run: |
+          RESPONSE=$(curl -s -X POST http://localhost/request_ride \
+            -H "Content-Type: application/json" \
+            -d '{"rider_id": 4, "latitude": 34.05, "longitude": -118.24}')
+          echo "Request Ride Response: $RESPONSE"
+          echo "$RESPONSE" | grep -q "Ride request received" || exit 1
+
+      - name: Test Ride Matching & Assignment
+        run: |
+          echo "Waiting for matcher worker to assign driver..."
+          SUCCESS=false
+          for i in {1..15}; do
+            STATUS=$(curl -s http://localhost/trip/1 | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+            echo "Attempt $i: Trip status is '$STATUS'"
+            if [ "$STATUS" == "assigned" ]; then
+              SUCCESS=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$SUCCESS" != "true" ]; then
+            echo "Trip assignment failed!"
+            docker compose logs matcher
+            exit 1
+          fi
+          echo "Trip successfully matched and assigned!"
+
+      - name: Test Prometheus Metrics Endpoint
+        run: |
+          curl -s -f http://localhost:9090/-/healthy
+          echo "Prometheus is healthy!"
+
+      - name: Dump Logs on Failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --tail=100
+
+      - name: Tear Down Stack
+        if: always()
+        run: |
+          docker compose down -v
+
+  docker-hub:
+    name: Build & Push Images to Docker Hub
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Check Docker Hub Credentials Availability
+        id: check_creds
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "has_creds=true" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub credentials found in repository secrets."
+          else
+            echo "has_creds=false" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub credentials not configured. Skipping image push."
+          fi
+
+      - name: Set up Docker Buildx
+        if: steps.check_creds.outputs.has_creds == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: steps.check_creds.outputs.has_creds == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and Push API Service
+        if: steps.check_creds.outputs.has_creds == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api_service
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/georide-api:latest
+
+      - name: Build and Push Location Service
+        if: steps.check_creds.outputs.has_creds == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./location_service
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/georide-location:latest
+
+      - name: Build and Push Matcher Service
+        if: steps.check_creds.outputs.has_creds == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./matcher_service
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/georide-matcher:latest
+
+      - name: Build and Push Driver Simulator
+        if: steps.check_creds.outputs.has_creds == 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./driver_simulator
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/georide-simulator:latest
