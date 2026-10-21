@@ -2,24 +2,20 @@
 
 # ---- Stage 1: Build ----
 # Use the official Golang image to build the application.
-FROM golang:1.22-alpine as builder
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
-# 1. Copy the module files first. This is still a good practice for layer caching.
-# If go.mod/go.sum don't change, this layer is cached.
-COPY go.mod go.sum* ./
+# 1. Copy go.mod and complete go.sum first for layer caching
+COPY go.mod go.sum ./
 
-# 2. Copy the entire source code into the container.
-# This is the critical step that was missing in the right place.
+# 2. Download dependencies based on verified checksums
+RUN go mod download
+
+# 3. Copy the source code into the container
 COPY . .
 
-# 3. Tidy the modules. NOW, 'go mod tidy' can see your main.go,
-# realize it imports go-redis, and correctly populate the go.sum file.
-# It will also download the dependencies. This is the fix.
-RUN go mod tidy
-
-# 4. Build the application. The go.sum file is now correct, so the build will succeed.
+# 4. Build the application statically
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /go/bin/location-service .
 
 

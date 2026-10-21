@@ -2,7 +2,7 @@
 
 # ---- Stage 1: Builder ----
 # This stage builds a virtual environment with our dependencies.
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 # Prevent python from writing pyc files
 ENV PYTHONDONTWRITEBYTECODE 1
