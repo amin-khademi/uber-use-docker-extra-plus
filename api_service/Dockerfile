@@ -5,9 +5,9 @@
 FROM python:3.11-slim AS builder
 
 # Prevent python from writing pyc files
-ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONDONTWRITEBYTECODE=1
 # Ensure python output is sent straight to the terminal without buffering
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
